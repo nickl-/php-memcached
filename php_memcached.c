@@ -52,6 +52,7 @@
 #endif
 
 #include "fastlz/fastlz.h"
+#include "lz4/lz4.h"
 #include <zlib.h>
 
 /* Used to store the size of the block */
@@ -128,6 +129,7 @@ typedef unsigned long int uint32_t;
 #define MEMC_VAL_COMPRESSED    (1<<4)
 #define MEMC_VAL_COMPRESSION_ZLIB    (1<<5)
 #define MEMC_VAL_COMPRESSION_FASTLZ  (1<<6)
+#define MEMC_VAL_COMPRESSION_LZ4     (1<<7)
 
 /****************************************
   "get" operation flags
@@ -182,6 +184,7 @@ typedef unsigned long int uint32_t;
 enum memcached_compression_type {
 	COMPRESSION_TYPE_ZLIB = 1,
 	COMPRESSION_TYPE_FASTLZ = 2,
+	COMPRESSION_TYPE_LZ4 = 3,
 };
 
 typedef struct {
@@ -252,6 +255,8 @@ static PHP_INI_MH(OnUpdateCompressionType)
 		MEMC_G(compression_type_real) = COMPRESSION_TYPE_FASTLZ;
 	} else if (!strcmp(new_value, "zlib")) {
 		MEMC_G(compression_type_real) = COMPRESSION_TYPE_ZLIB;
+	} else if (!strcmp(new_value, "lz4")) {
+		MEMC_G(compression_type_real) = COMPRESSION_TYPE_LZ4;
 	} else {
 		return FAILURE;
 	}
@@ -2228,7 +2233,8 @@ static int php_memc_set_option(php_memc_t *i_obj, long option, zval *value TSRML
 		case MEMC_OPT_COMPRESSION_TYPE:
 			convert_to_long(value);
 			if (Z_LVAL_P(value) == COMPRESSION_TYPE_FASTLZ ||
-				Z_LVAL_P(value) == COMPRESSION_TYPE_ZLIB) {
+				Z_LVAL_P(value) == COMPRESSION_TYPE_ZLIB ||
+				Z_LVAL_P(value) == COMPRESSION_TYPE_LZ4) {
 				m_obj->compression_type = Z_LVAL_P(value);
 			} else {
 				/* invalid compression type */
@@ -2844,6 +2850,9 @@ static char *php_memc_zval_to_payload(zval *value, size_t *payload_len, uint32_t
 		} else if (compression_type == COMPRESSION_TYPE_ZLIB) {
 			compress_status = (compress((Bytef *)payload_comp, &payload_comp_len, (Bytef *)p, l) == Z_OK);
 			*flags |= MEMC_VAL_COMPRESSION_ZLIB;
+		} else if (compression_type == COMPRESSION_TYPE_LZ4) {
+			compress_status = ((payload_comp_len = LZ4_compress_limitedOutput(p, payload_comp, l, payload_comp_len)) > 0);
+			*flags |= MEMC_VAL_COMPRESSION_LZ4;
 		}
 
 		if (!compress_status) {
@@ -2905,7 +2914,7 @@ static int php_memc_zval_from_payload(zval *value, char *payload, size_t payload
 		zend_bool decompress_status = 0;
 
 		/* Stored with newer memcached extension? */
-		if (flags & MEMC_VAL_COMPRESSION_FASTLZ || flags & MEMC_VAL_COMPRESSION_ZLIB) {
+		if (flags & MEMC_VAL_COMPRESSION_FASTLZ || flags & MEMC_VAL_COMPRESSION_ZLIB || flags & MEMC_VAL_COMPRESSION_LZ4) {
 			/* This is copied from Ilia's patch */
 			memcpy(&len, payload, sizeof(uint32_t));
 			buffer = emalloc(len + 1);
@@ -2917,6 +2926,8 @@ static int php_memc_zval_from_payload(zval *value, char *payload, size_t payload
 				decompress_status = ((length = fastlz_decompress(payload, payload_len, buffer, len)) > 0);
 			} else if (flags & MEMC_VAL_COMPRESSION_ZLIB) {
 				decompress_status = (uncompress((Bytef *)buffer, &length, (Bytef *)payload, payload_len) == Z_OK);
+			} else if (flags & MEMC_VAL_COMPRESSION_LZ4) {
+				decompress_status = ((length = LZ4_uncompress_unknownOutputSize(payload, buffer, payload_len, len)) > 0);
 			}
 		}
 
@@ -3793,6 +3804,7 @@ static void php_memc_register_constants(INIT_FUNC_ARGS)
 	 */
 	REGISTER_MEMC_CLASS_CONST_LONG(COMPRESSION_FASTLZ, COMPRESSION_TYPE_FASTLZ);
 	REGISTER_MEMC_CLASS_CONST_LONG(COMPRESSION_ZLIB,   COMPRESSION_TYPE_ZLIB);
+	REGISTER_MEMC_CLASS_CONST_LONG(COMPRESSION_LZ4,   COMPRESSION_TYPE_LZ4);
 
 	/*
 	 * Flags.
